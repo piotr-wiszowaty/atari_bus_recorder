@@ -1,0 +1,482 @@
+;    Copyright (C) 2014  Piotr Wiszowaty
+;
+;    This program is free software: you can redistribute it and/or modify
+;    it under the terms of the GNU General Public License as published by
+;    the Free Software Foundation, either version 3 of the License, or
+;    (at your option) any later version.
+;  
+;    This program is distributed in the hope that it will be useful,
+;    but WITHOUT ANY WARRANTY; without even the implied warranty of
+;    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;    GNU General Public License for more details.
+;
+;    You should have received a copy of the GNU General Public License
+;    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+MAX_SAMPLES equ 8192
+
+VCC_MASK  equ 0x01
+FI2_MASK  equ 0x02
+S4_MASK	  equ 0x04
+S5_MASK	  equ 0x08
+CCTL_MASK equ 0x10
+RW_MASK	  equ 0x20
+
+B0_MASK	  equ 0x10
+B1_MASK	  equ 0x20
+B2_MASK	  equ 0x40
+
+LED_L     equ 0
+LED_H     equ 1
+T_CONTROL equ 2
+T_STATUS  equ 2
+U_STATUS  equ 3
+U_CONTROL equ 3
+U_DATA    equ 4
+SWITCH_L  equ 6
+SWITCH_H  equ 7
+HEX0_D    equ 8
+HEX1_D    equ 9
+HEX2_D    equ 10
+HEX3_D    equ 11
+V_STATUS  equ 12
+VRAM_A_LO equ 13
+VRAM_A_HI equ 14
+VRAM_DATA equ 15
+VRAM_DATI equ 16
+COLR1_R   equ 17
+COLR1_G   equ 18
+COLR1_B   equ 19
+S_STATUS  equ 20
+S_CONTROL equ 20
+BUTTON    equ 20
+S_NEGEDGE equ 21
+S_POSEDGE equ 22
+SAMPLE_LL equ 23
+SAMPLE_LH equ 24
+SAMPLE_HL equ 25
+SAMPLE_HH equ 26
+SAMPLEA_L equ 27
+SAMPLEA_H equ 28
+TEXT_ADDR equ 29
+TEXT_DATA equ 30
+
+reset:
+	; reset UART FIFOs
+	load	s0, 0x01
+	out	s0, U_CONTROL
+	load	s0, 0x00
+	out	s0, U_CONTROL
+
+	; turn off 7-segment displays
+	load	s0, 0x20
+	out	s0, HEX0_D
+	out	s0, HEX1_D
+	out	s0, HEX2_D
+	out	s0, HEX3_D
+
+loop:
+	load	s0, 0x01
+	out	s0, LED_L
+
+	call	clear_screen
+
+	load	s0, 0
+	out	s0, VRAM_A_LO
+	out	s0, VRAM_A_HI
+	load	s1, 0
+	call	display_message
+
+	; reset sample count/address
+	load	s0, 0
+	out	s0, SAMPLEA_L
+	out	s0, SAMPLEA_H
+
+	; reset sampler's FIFOs
+	load	s0, 0x01
+	out	s0, S_CONTROL
+
+	; wait for Atari VCC turn on
+1:	in	s0, S_STATUS
+	test	s0, 0x04
+	jump	z, 1b
+
+	load	s0, 0x03
+	out	s0, LED_L
+
+	call	clear_screen
+
+	load	s0, 0
+	out	s0, VRAM_A_LO
+	out	s0, VRAM_A_HI
+	load	s1, 1
+	call	display_message
+
+	; delay 100 ms
+	load	s0, 0x04
+	out	s0, T_CONTROL
+delay:	in	s1, T_STATUS
+	test	s1, s0
+	jump	nz, delay
+
+	; release sampler reset
+	load	s0, 0x00
+	out	s0, S_CONTROL
+
+	load	s0, 0x07
+	out	s0, LED_L
+
+	load	s1, (MAX_SAMPLES/2-1) & 0xff
+	load	s2, ((MAX_SAMPLES/2-1) >> 8) & 0xff
+acquire_loop:
+	in	s0, S_STATUS
+	test	s0, 0x20		; BUTTON1 pressed?
+	jump	z, acquire_done
+	test	s0, 0x01
+	jump	nz, acquire_loop
+	in	s0, S_POSEDGE
+	out	s0, SAMPLE_LL
+	in	s0, S_NEGEDGE
+	out	s0, SAMPLE_LL
+	sub	s1, 1
+	subc	s2, 0
+	jump	nc, acquire_loop
+acquire_done:
+
+	load	s0, 0x0f
+	out	s0, LED_L
+
+	load	s0, 0
+	out	s0, VRAM_A_LO
+	out	s0, VRAM_A_HI
+	load	s1, 2
+	call	display_message
+
+	in	se, SAMPLEA_L		; sf:se - total samples
+	in	sf, SAMPLEA_H
+	load	s8, 0			; s9:s0 - start sample address
+	load	s9, 0
+	in	sc, BUTTON
+	and	sc, B2_MASK
+display_loop:
+	load	sd, 1			; y
+	out	s8, SAMPLEA_L
+	out	s9, SAMPLEA_H
+display_line:
+	load	s0, sd
+	call	goto_y
+	; display cycle number == sample address / 2
+	in	s2, SAMPLEA_L
+	in	s3, SAMPLEA_H
+	sr0	s3
+	sra	s2
+	load	s0, s3
+	and	s0, 0x0f
+	call	show_hex_byte
+	load	s0, s2
+	call	show_hex_byte
+	; show VCC
+	load	s0, 4
+	call	go_right
+	in	s2, SAMPLE_LL
+	test	s2, VCC_MASK
+	call	show_signal
+	; show separator
+	load	s0, 3
+	call	go_right
+	load	s0, 0xb0
+	out	s0, VRAM_DATI
+	load	s0, ' '
+	out	s0, VRAM_DATI
+	; show posedge sample
+	call	show_signals
+	call	next_sample
+	; show separator
+	load	s0, ' '
+	out	s0, VRAM_DATI
+	load	s0, 0xb0
+	out	s0, VRAM_DATI
+	load	s0, ' '
+	out	s0, VRAM_DATI
+	; show negedge sample
+	call	show_signals
+	call	next_sample
+	; next line
+	add	sd, 1		; y + 1
+	comp	sd, 30
+	jump	c, display_line
+display_lines_done:	
+
+check_buttons:
+	in	sa, BUTTON
+	test	sa, B1_MASK		; restart when BUTTON1 is pressed
+	jump	z, loop
+	and	sa, B2_MASK
+	load	sb, sc			; sa - current button state, sb - previous button state
+	load	sc, sa
+
+	in	s2, T_STATUS		; skip button check when timer is still running
+	test	s2, 0x02
+	jump	nz, check_buttons
+
+	load	s0, sa
+	xor	s0, sb
+	and	s0, sb
+	jump	nz, keypress
+	load	s0, sa
+	xor	s0, sb
+	and	s0, sa
+	jump	nz, keyrelease
+	jump	check_buttons
+
+keypress:
+	load	s0, 0x02		; start timer
+	out	s0, T_CONTROL
+	in	s0, SWITCH_L
+	test	s0, 0x20
+	jump	nz, dec_addr
+inc_addr:
+	in	s0, SWITCH_L
+	and	s0, 0xc0
+	comp	s0, 0x00
+	jump	z, inc_addr_2
+	comp	s0, 0x40
+	jump	z, inc_addr_32
+	comp	s0, 0x80
+	jump	z, inc_addr_64
+inc_addr_512:
+	add	s9, 2
+	jump	display_loop
+inc_addr_64:
+	add	s8, 64
+	addc	s9, 0
+	jump	display_loop
+inc_addr_32:
+	add	s8, 32
+	addc	s9, 0
+	jump	display_loop
+inc_addr_2:
+	add	s8, 2
+	addc	s9, 0
+	jump	display_loop
+dec_addr:
+	in	s0, SWITCH_L
+	and	s0, 0xc0
+	comp	s0, 0x00
+	jump	z, dec_addr_2
+	comp	s0, 0x40
+	jump	z, dec_addr_32
+	comp	s0, 0x80
+	jump	z, dec_addr_64
+dec_addr_512:
+	sub	s9, 2
+	jump	display_loop
+dec_addr_64:
+	sub	s8, 64
+	subc	s9, 0
+	jump	display_loop
+dec_addr_32:
+	sub	s8, 32
+	subc	s9, 0
+	jump	display_loop
+dec_addr_2:
+	sub	s8, 2
+	subc	s9, 0
+	jump	display_loop
+
+keyrelease:
+	load	s0, 0x02		; start timer
+	out	s0, T_CONTROL
+	jump	check_buttons
+; ------
+show_signals:
+	; show RW
+	in	s2, SAMPLE_LL
+	test	s2, RW_MASK
+	call	show_signal
+	; show #S4
+	load	s0, 2
+	call	go_right
+	test	s2, S4_MASK
+	call	show_signal
+	; show #S5
+	load	s0, 3
+	call	go_right
+	test	s2, S5_MASK
+	call	show_signal
+	; show #CCTL
+	load	s0, 3
+	call	go_right
+	test	s2, CCTL_MASK
+	call	show_signal
+	; show address
+	load	s0, 5
+	call	go_right
+	in	s2, SAMPLE_LH
+	in	s3, SAMPLE_HL
+	in	s4, SAMPLE_HH
+	sl0	s2
+	sla	s3
+	sla	s4
+	sl0	s2
+	sla	s3
+	sla	s4
+	and	s4, 0x1f
+	in	s0, SAMPLE_LL
+chk_s4:	test	s0, S4_MASK
+	jump	nz, chk_s5
+	or	s4, 0x80
+	jump	show_address
+chk_s5:	test	s0, S5_MASK
+	jump	nz, chk_d5
+	or	s4, 0xa0
+	jump	show_address
+chk_d5:	test	s0, CCTL_MASK
+	jump	nz, show_address
+	add	s4, 0xd5
+show_address:
+	load	s0, s4
+	call	show_hex_byte
+	load	s0, s3
+	call	show_hex_byte
+	; show data
+	load	s0, 1
+	call	go_right
+	in	s2, SAMPLE_LL
+	in	s3, SAMPLE_LH
+	sl0	s2
+	sla	s3
+	sl0	s2
+	sla	s3
+	load	s0, s3
+	call	show_hex_byte
+	; show aux signal
+	load	s0, ' '
+	out	s0, VRAM_DATI
+	in	s2, SAMPLE_HH
+	test	s2, 0x80
+	call	show_signal
+	test	s2, 0x40
+	call	show_signal
+	test	s2, 0x20
+	call	show_signal
+	ret
+; ------
+show_signal:
+	load	s0, '0'
+	jump	z, 1f
+	load	s0, '1'
+1:	out	s0, VRAM_DATI
+	ret
+; ------
+; VRAM_A_HI:VRAM_A_LO := s0 * 80
+goto_y:
+	load	s1, 0
+	sl0	s0
+	sla	s1
+	sl0	s0
+	sla	s1
+	sl0	s0
+	sla	s1
+	sl0	s0
+	sla	s1
+	load	s2, s0
+	load	s3, s1
+	sl0	s0
+	sla	s1
+	sl0	s0
+	sla	s1
+	add	s2, s0
+	addc	s3, s1
+	out	s2, VRAM_A_LO
+	out	s3, VRAM_A_HI
+	ret
+; ------
+; VRAM_A_HI:VRAM_A_LO := VRAM_A_HI:VRAM_A_LO + s0
+go_right:
+	in	s1, VRAM_A_LO
+	add	s1, s0
+	out	s1, VRAM_A_LO
+	in	s1, VRAM_A_HI
+	addc	s1, 0
+	out	s1, VRAM_A_HI
+	ret
+; ------
+; SAMPLEA_H:SAMPLEA_L := SAMPLEA_H:SAMPLEA_L + 1
+next_sample:
+	in	s0, SAMPLEA_L
+	add	s0, 1
+	out	s0, SAMPLEA_L
+	in	s0, SAMPLEA_H
+	addc	s0, 0
+	out	s0, SAMPLEA_H
+	ret
+; ------
+; input: s0 - byte to show
+show_hex_byte:
+	load	s1, s0
+	sr0	s1
+	sr0	s1
+	sr0	s1
+	sr0	s1
+	comp	s1, 10
+	jump	c, 1f
+	add	s1, 'A'-'0'-10
+1:	add	s1, '0'
+	out	s1, VRAM_DATI
+	and	s0, 0x0f
+	comp	s0, 10
+	jump	c, 1f
+	add	s0, 'A'-'0'-10
+1:	add	s0, '0'
+	out	s0, VRAM_DATI
+	ret
+; ------
+; input: s1 - message index
+display_message:
+	load	s3, 0
+	out	s3, TEXT_ADDR
+find_message:
+	test	s1, s1
+	jump	z, message_found
+	call	get_text_data	; length
+	load	s2, s0
+1:	call	get_text_data
+	sub	s2, 1
+	jump	nz, 1b
+	sub	s1, 1
+	jump	find_message
+message_found:
+
+	call	get_text_data	; length
+	load	s1, s0
+1:	call	get_text_data
+	out	s0, VRAM_DATI
+	sub	s1, 1
+	jump	nz, 1b
+	
+	ret
+; ------
+get_text_data:
+	in	s0, TEXT_DATA
+	add	s3, 1
+	out	s3, TEXT_ADDR
+	ret
+; ------
+clear_screen:
+	load	s0, 0
+	out	s0, VRAM_A_LO
+	out	s0, VRAM_A_HI
+	load	s1, (80*30-1) & 0xff
+	load	s2, ((80*30-1) >> 8) & 0xff
+1:	out	s0, VRAM_DATI
+	sub	s1, 1
+	subc	s2, 0
+	jump	nc, 1b
+	ret
+; ------
+w8_rx_ready:
+	in	s0, U_STATUS
+	test	s0, 0x01
+	jump	z, w8_rx_ready
+	ret
